@@ -14,7 +14,7 @@ Before getting started, make sure you have the following installed:
 1. Clone the repository:
 
     ```bash
-    git clone https://github.com/your-username/cube_stacking_rl.git
+    https://github.com/salvingeorge/cube_stacking_rl.git
     ```
 
 2. Navigate to the project directory:
