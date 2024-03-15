@@ -38,9 +38,9 @@ Before getting started, make sure you have the following installed:
 
 ## Usage
 1. download the dataset
-    ''bash
+    ```bash
     python -m mani_skill2.utils.download_demo "StackCube-v0"
-    ''
+    ```
 2. Convert the dataset into trajectories:
 
     ```bash
