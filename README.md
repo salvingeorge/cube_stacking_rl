@@ -38,13 +38,13 @@ Before getting started, make sure you have the following installed:
 
 ## Usage
 1. download the dataset
-    '''bash
+    ''bash
     python -m mani_skill2.utils.download_demo "StackCube-v0"
-    '''
+    ''
 2. Convert the dataset into trajectories:
 
     ```bash
-    python -m mani_skill2.trajectory.replay_trajectory --traj-path demos/rigid_body/LiftCube-v0/trajectory.h5 --save-traj -o state -c pd_ee_delta_pose --num-procs 8
+    python -m mani_skill2.trajectory.replay_trajectory --traj-path demos/v0/rigid_body/StackCube-v0/trajectory.h5 --save-traj -o state -c pd_ee_delta_pose --num-procs 8
     ```
 
 3. Train the agent:
