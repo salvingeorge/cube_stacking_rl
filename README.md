@@ -53,7 +53,9 @@ Before getting started, make sure you have the following installed:
     python state_imitation_learning_stackcube.py --demos=demos/v0/rigid_body/StackCube-v0/trajectory.state.pd_ee_delta_pose.h5
     ```
 
-    This will load the trained model and evaluate its performance.
+    This will load the train the model and evaluate its performance.
+
+    When prompted, enter your wandb details
 
 ## Contributing
 

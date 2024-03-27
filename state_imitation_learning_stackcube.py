@@ -15,7 +15,7 @@ from tqdm import tqdm
 import mani_skill2.envs
 from mani_skill2.utils.wrappers import RecordEpisode
 import wandb
-from torchvision.models import resnet18
+# from torchvision.models import resnet18
 
 
 # loads h5 data into memory for faster access
@@ -72,7 +72,7 @@ class ManiSkill2Dataset(Dataset):
 
 
 class Policy(nn.Module):
-    def __init__(self, obs_dims, act_dims, hidden_units=[256,128,64,128,256], activation=nn.ReLU):
+    def __init__(self, obs_dims, act_dims, hidden_units=[128,128,128], activation=nn.ReLU):
         super().__init__()
         self.layers = nn.ModuleList()
         prev_units = obs_dims
@@ -87,6 +87,16 @@ class Policy(nn.Module):
         self.tanh = nn.Tanh()
 
     def forward(self, observations):
+        """
+        Applies a series of layers to the input observations and returns the output after passing through a tanh activation function.
+
+        Args:
+            observations: Input tensor representing observations.
+
+        Returns:
+            Tensor: Output tensor after passing through the layers and tanh activation function.
+        """
+
         x = observations
         for layer in self.layers:
             x = layer(x)
@@ -112,7 +122,7 @@ def parse_args():
         help="path for where logs, checkpoints, and videos are saved",
     )
     parser.add_argument(
-        "--steps", type=int, help="number of training steps", default=1350000
+        "--steps", type=int, help="number of training steps", default=30000
     )
     parser.add_argument(
         "--eval", action="store_true", help="whether to only evaluate policy"
@@ -173,7 +183,7 @@ def main():
         print("Action:", action.shape)
         # create our policy
         obs, action = dataset[0]
-        policy = Policy(obs.shape[0], action.shape[0], hidden_units=[256,128,64,128,256])
+        policy = Policy(obs.shape[0], action.shape[0], hidden_units=[128,128,128])
     # move model to gpu if possible
     device = "cuda" if th.cuda.is_available() else "cpu"
     if th.cuda.is_available():
@@ -224,9 +234,12 @@ def main():
                 i += 1
                 obs, _ = env.reset(seed=i)
                 pbar.update(1)
+                
+        rewards.append(reward)
+        print("rewards:",rewards)
+        # print("rewards:",reward)
         success_rate = np.mean(successes)
-        max_success_rate = np.max(successes)
-        return success_rate, max_success_rate
+        return success_rate, rewards
 
     if not args.eval:
         writer = SummaryWriter(log_dir)
@@ -237,7 +250,6 @@ def main():
         epoch = 0
         steps = 0
         policy.iter = 0  # Reset the iteration counter
-        success_rate_accumulator = 0
 
         while steps < iterations:
             epoch_loss = 0
@@ -266,7 +278,7 @@ def main():
             if epoch_loss < best_epoch_loss:
                 best_epoch_loss = epoch_loss
                 save_model(policy, osp.join(ckpt_dir, "ckpt_best.pt"))
-            if epoch % 10 == 0: #changed from 50
+            if epoch % 1000 == 0: #changed from 50
                 print("Evaluating")
                 success_rate, _ = evaluate_policy(env, policy)
                 # Log success rate to wandb
@@ -277,12 +289,12 @@ def main():
         save_model(policy, osp.join(ckpt_dir, "ckpt_latest.pt"))
 
     # run a final evaluation
-    success_rate, success_rate_accumulator = evaluate_policy(env, policy)
+    success_rate, rewards = evaluate_policy(env, policy)
     print("Final Success Rate {:.6f}".format(success_rate))
-    print("Max Success achieved in training {:.6f}".format(success_rate_accumulator))
+    print("Mean reward accumulated{:.6f}".format(np.mean(rewards)))
+    print("Max reward accumulated{:.6f}".format(np.max(rewards)))
     
-
-
+    
 
 if __name__ == "__main__":
     main()
