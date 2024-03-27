@@ -14,6 +14,8 @@ from tqdm import tqdm
 
 import mani_skill2.envs
 from mani_skill2.utils.wrappers import RecordEpisode
+import wandb
+from torchvision.models import resnet18
 
 
 # loads h5 data into memory for faster access
@@ -70,26 +72,25 @@ class ManiSkill2Dataset(Dataset):
 
 
 class Policy(nn.Module):
-    def __init__(
-        self,
-        obs_dims,
-        act_dims,
-        hidden_units=[128, 128, 128],
-        activation=nn.ReLU,
-    ):
+    def __init__(self, obs_dims, act_dims, hidden_units=[256,128,64,128,256], activation=nn.ReLU):
         super().__init__()
-        mlp_layers = []
+        self.layers = nn.ModuleList()
         prev_units = obs_dims
-        for h in hidden_units:
-            mlp_layers += [nn.Linear(prev_units, h), activation()]
+        self.layers.append(nn.Linear(prev_units, hidden_units[0]))
+        self.layers.append(activation())
+        prev_units = hidden_units[0]
+        for h in hidden_units[1:]:
+            self.layers.append(nn.Linear(prev_units, h))
+            self.layers.append(activation())
             prev_units = h
-        # attach a tanh regression head since we know all actions are constrained to [-1, 1]
-        mlp_layers += [nn.Linear(prev_units, act_dims), nn.Tanh()]
-        self.mlp = nn.Sequential(*mlp_layers)
+        self.layers.append(nn.Linear(prev_units, act_dims))
+        self.tanh = nn.Tanh()
 
-    def forward(self, observations) -> th.Tensor:
-        return self.mlp(observations)
-
+    def forward(self, observations):
+        x = observations
+        for layer in self.layers:
+            x = layer(x)
+        return self.tanh(x)
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -111,7 +112,7 @@ def parse_args():
         help="path for where logs, checkpoints, and videos are saved",
     )
     parser.add_argument(
-        "--steps", type=int, help="number of training steps", default=50000
+        "--steps", type=int, help="number of training steps", default=1350000
     )
     parser.add_argument(
         "--eval", action="store_true", help="whether to only evaluate policy"
@@ -125,6 +126,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    wandb.init(project='rl-imitation-learning')
     env_id = args.env_id
     demo_path = args.demos
     log_dir = args.log_dir
@@ -160,7 +162,7 @@ def main():
         dataset = ManiSkill2Dataset(demo_path)
         dataloader = DataLoader(
             dataset,
-            batch_size=128,
+            batch_size=256,
             num_workers=4,
             pin_memory=True,
             drop_last=True,
@@ -171,7 +173,7 @@ def main():
         print("Action:", action.shape)
         # create our policy
         obs, action = dataset[0]
-        policy = Policy(obs.shape[0], action.shape[0], hidden_units=[128, 128, 128])
+        policy = Policy(obs.shape[0], action.shape[0], hidden_units=[256,128,64,128,256])
     # move model to gpu if possible
     device = "cuda" if th.cuda.is_available() else "cpu"
     if th.cuda.is_available():
@@ -179,29 +181,36 @@ def main():
     policy = policy.to(device)
     print(policy)
 
-    loss_fn = nn.SmoothL1Loss()#changed from MSELoss
+    loss_fn = nn.MSELoss()#changed from MSELoss
 
     # a short save function to save our model
     def save_model(policy, path):
         th.save(policy, path)
 
-    def train_step(policy, obs, actions, optim, loss_fn):
+    def train_step(policy, obs, actions, optim, loss_fn, grad_accumulation_steps=8):
         optim.zero_grad()
-        # move data to appropriate device first
         obs = obs.to(device)
         actions = actions.to(device)
 
         pred_actions = policy(obs)
-
-        # compute loss and optimize
         loss = loss_fn(actions, pred_actions)
+        loss = loss / grad_accumulation_steps  # Normalize the loss
+
         loss.backward()
-        optim.step()
+
+        if (policy.iter + 1) % grad_accumulation_steps == 0:
+            optim.step()
+            optim.zero_grad()
+            policy.iter = 0  # Reset the iteration counter
+
+        policy.iter += 1  # Increment the iteration counter
+
         return loss.item()
 
     def evaluate_policy(env, policy, num_episodes=10):
         obs, _ = env.reset()
         successes = []
+        rewards = []
         i = 0
         pbar = tqdm(total=num_episodes, leave=False)
         while i < num_episodes:
@@ -216,16 +225,20 @@ def main():
                 obs, _ = env.reset(seed=i)
                 pbar.update(1)
         success_rate = np.mean(successes)
-        return success_rate
+        max_success_rate = np.max(successes)
+        return success_rate, max_success_rate
 
     if not args.eval:
         writer = SummaryWriter(log_dir)
 
-        optim = th.optim.Adam(policy.parameters(), lr=1e-2) #changed from 1e-3
+        optim = th.optim.Adam(policy.parameters(), lr=1e-4, weight_decay=1e-5)
         best_epoch_loss = np.inf
         pbar = tqdm(dataloader, total=iterations)
         epoch = 0
         steps = 0
+        policy.iter = 0  # Reset the iteration counter
+        success_rate_accumulator = 0
+
         while steps < iterations:
             epoch_loss = 0
             for batch in dataloader:
@@ -233,8 +246,8 @@ def main():
                 obs, actions = batch
                 loss_val = train_step(policy, obs, actions, optim, loss_fn)
 
-                # track the loss and print it
-                writer.add_scalar("train/mse_loss", loss_val, steps)
+                # Log loss to wandb
+                wandb.log({"train/mse_loss": loss_val}, step=steps)
                 epoch_loss += loss_val
                 pbar.set_postfix(dict(loss=loss_val))
                 pbar.update(1)
@@ -244,6 +257,8 @@ def main():
                     save_model(policy, osp.join(ckpt_dir, f"ckpt_{steps}.pt"))
                 if steps >= iterations:
                     break
+            wandb.log({"train/mse_loss_epoch_pre": epoch_loss}, step=epoch)
+            
 
             epoch_loss = epoch_loss / len(dataloader)
 
@@ -253,15 +268,20 @@ def main():
                 save_model(policy, osp.join(ckpt_dir, "ckpt_best.pt"))
             if epoch % 10 == 0: #changed from 50
                 print("Evaluating")
-                success_rate = evaluate_policy(env, policy)
-                writer.add_scalar("test/success_rate", success_rate, epoch)
-            writer.add_scalar("train/mse_loss_epoch", epoch_loss, epoch)
+                success_rate, _ = evaluate_policy(env, policy)
+                # Log success rate to wandb
+                wandb.log({"test/success_rate": success_rate}, step=epoch)
+            # Log epoch loss to wandb
+            wandb.log({"train/mse_loss_epoch": epoch_loss}, step=epoch)
             epoch += 1
         save_model(policy, osp.join(ckpt_dir, "ckpt_latest.pt"))
 
     # run a final evaluation
-    success_rate = evaluate_policy(env, policy)
-    print(f"Final Success Rate {success_rate}")
+    success_rate, success_rate_accumulator = evaluate_policy(env, policy)
+    print("Final Success Rate {:.6f}".format(success_rate))
+    print("Max Success achieved in training {:.6f}".format(success_rate_accumulator))
+    
+
 
 
 if __name__ == "__main__":
